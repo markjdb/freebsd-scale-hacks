@@ -2191,7 +2191,7 @@ pmap_free_zero_pages(struct dflist *free)
 		/* Preserve the page's PG_ZERO setting. */
 		vm_page_free_toq(m);
 	}
-	atomic_subtract_int(&vm_cnt.v_wire_count, free->wire_count);
+	atomic_subtract_int(&global_v_wire_count, free->wire_count);
 	free->wire_count = 0;
 }
 
@@ -2305,7 +2305,7 @@ _pmap_unwire_ptp(pmap_t pmap, vm_offset_t va, vm_page_t m, struct dflist *free)
 	 * the page table page is globally performed before TLB shoot-
 	 * down is begun.
 	 */
-	atomic_subtract_rel_int(&vm_cnt.v_wire_count, 1);
+	atomic_subtract_rel_int(&global_v_wire_count, 1);
 #endif
 
 	/* 
@@ -2509,7 +2509,7 @@ _pmap_allocpte(pmap_t pmap, vm_pindex_t ptepindex, struct rwlock **lockp)
 			if (_pmap_allocpte(pmap, NUPDE + NUPDPE + pml4index,
 			    lockp) == NULL) {
 				--m->wire_count;
-				atomic_subtract_int(&vm_cnt.v_wire_count, 1);
+				atomic_subtract_int(&global_v_wire_count, 1);
 				vm_page_free_zero(m);
 				return (NULL);
 			}
@@ -2542,7 +2542,7 @@ _pmap_allocpte(pmap_t pmap, vm_pindex_t ptepindex, struct rwlock **lockp)
 			if (_pmap_allocpte(pmap, NUPDE + pdpindex,
 			    lockp) == NULL) {
 				--m->wire_count;
-				atomic_subtract_int(&vm_cnt.v_wire_count, 1);
+				atomic_subtract_int(&global_v_wire_count, 1);
 				vm_page_free_zero(m);
 				return (NULL);
 			}
@@ -2556,7 +2556,7 @@ _pmap_allocpte(pmap_t pmap, vm_pindex_t ptepindex, struct rwlock **lockp)
 				if (_pmap_allocpte(pmap, NUPDE + pdpindex,
 				    lockp) == NULL) {
 					--m->wire_count;
-					atomic_subtract_int(&vm_cnt.v_wire_count,
+					atomic_subtract_int(&global_v_wire_count,
 					    1);
 					vm_page_free_zero(m);
 					return (NULL);
@@ -2690,7 +2690,7 @@ pmap_release(pmap_t pmap)
 	pmap->pm_pml4[PML4PML4I] = 0;	/* Recursive Mapping */
 
 	m->wire_count--;
-	atomic_subtract_int(&vm_cnt.v_wire_count, 1);
+	atomic_subtract_int(&global_v_wire_count, 1);
 	vm_page_free_zero(m);
 }
 
@@ -2992,7 +2992,7 @@ reclaim_pv_chunk(pmap_t locked_pmap, struct rwlock **lockp)
 		SLIST_REMOVE_HEAD(&free.list, plinks.s.ss);
 		/* Recycle a freed page table page. */
 		m_pc->wire_count = 1;
-		atomic_add_int(&vm_cnt.v_wire_count, 1);
+		atomic_add_int(&global_v_wire_count, 1);
 	}
 	pmap_free_zero_pages(&free);
 	return (m_pc);
@@ -3661,7 +3661,7 @@ pmap_remove_pde(pmap_t pmap, pd_entry_t *pdq, vm_offset_t sva,
 			mpte->wire_count = 0;
 			pmap_add_delayed_free_list(mpte, free, FALSE);
 #if 0
-			atomic_subtract_int(&vm_cnt.v_wire_count, 1);
+			atomic_subtract_int(&global_v_wire_count, 1);
 #endif
 		}
 	}
@@ -5504,7 +5504,7 @@ pmap_remove_pages(pmap_t pmap)
 						mpte->wire_count = 0;
 						pmap_add_delayed_free_list(mpte, &free, FALSE);
 #if 0
-						atomic_subtract_int(&vm_cnt.v_wire_count, 1);
+						atomic_subtract_int(&global_v_wire_count, 1);
 #endif
 					}
 				} else {
