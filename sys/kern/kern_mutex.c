@@ -796,12 +796,14 @@ retry:
 			    m->lock_object.lo_name, file, line));
 		WITNESS_CHECKORDER(&m->lock_object,
 		    opts | LOP_NEWORDER | LOP_EXCLUSIVE, file, line, NULL);
-		v = MTX_READ_VALUE(m);
+
+
+		if (_mtx_obtain_lock_fetch(m, &v, tid))
+			return;
 		for (;;) {
 			if (v == MTX_UNOWNED) {
-				if (_mtx_obtain_lock(m, tid))
+				if (_mtx_obtain_lock_fetch(m, &v, tid))
 					break;
-				v = MTX_READ_VALUE(m);
 				continue;
 			}
 			if (v == tid) {
