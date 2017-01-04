@@ -90,7 +90,7 @@ __FBSDID("$FreeBSD$");
  * Constants for the hash table of sleep queue chains.
  * SC_TABLESIZE must be a power of two for SC_MASK to work properly.
  */
-#define	SC_TABLESIZE	256			/* Must be power of 2. */
+#define	SC_TABLESIZE	512			/* Must be power of 2. */
 #define	SC_MASK		(SC_TABLESIZE - 1)
 #define	SC_SHIFT	8
 #define	SC_HASH(wc)	((((uintptr_t)(wc) >> SC_SHIFT) ^ (uintptr_t)(wc)) & \
@@ -125,7 +125,7 @@ struct sleepqueue {
 #ifdef INVARIANTS
 	struct lock_object *sq_lock;		/* (c) Associated lock. */
 #endif
-};
+} __aligned(CACHE_LINE_SIZE);
 
 struct sleepqueue_chain {
 	LIST_HEAD(, sleepqueue) sc_queues;	/* List of sleep queues. */
