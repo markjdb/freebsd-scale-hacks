@@ -445,4 +445,8 @@ extern void (*softdep_ast_cleanup)(void);
 
 void counted_warning(unsigned *counter, const char *msg);
 
+#define	__read_mostly		__section(".data.read_mostly")
+#define	__exclusive_cache_line	__aligned(CACHE_LINE_SIZE) \
+				    __section(".data.exclusive_cache_line")
+
 #endif /* !_SYS_SYSTM_H_ */
