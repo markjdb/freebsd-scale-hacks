@@ -470,6 +470,204 @@ lockdestroy(struct lock *lk)
 	lock_destroy(&lk->lock_object);
 }
 
+static void
+lockmgr_note_shared_acquire(struct lock *lk, int contested,
+    uint64_t waittime, const char *file, int line, int flags)
+{
+
+	lock_profile_obtain_lock_success(&lk->lock_object, contested, waittime,
+	    file, line);
+	LOCK_LOG_LOCK("SLOCK", &lk->lock_object, 0, 0, file, line);
+	WITNESS_LOCK(&lk->lock_object, LK_TRYWIT(flags), file, line);
+	TD_LOCKS_INC(curthread);
+	TD_SLOCKS_INC(curthread);
+	STACK_SAVE(lk);
+}
+
+static void
+lockmgr_note_shared_release(struct lock *lk)
+{
+
+	lock_profile_release_lock(&lk->lock_object);
+	TD_LOCKS_DEC(curthread);
+	TD_SLOCKS_DEC(curthread);
+}
+
+static void
+lockmgr_note_exclusive_acquire(struct lock *lk, int contested,
+    uint64_t waittime, const char *file, int line, int flags)
+{
+
+	lock_profile_obtain_lock_success(&lk->lock_object, contested, waittime,
+	    file, line);
+	LOCK_LOG_LOCK("XLOCK", &lk->lock_object, 0, lk->lk_recurse, file, line);
+	WITNESS_LOCK(&lk->lock_object, LOP_EXCLUSIVE | LK_TRYWIT(flags), file,
+	    line);
+	TD_LOCKS_INC(curthread);
+	STACK_SAVE(lk);
+}
+
+static void
+lockmgr_note_exclusive_release(struct lock *lk, const char *file, int line)
+{
+
+	lock_profile_release_lock(&lk->lock_object);
+	LOCK_LOG_LOCK("XUNLOCK", &lk->lock_object, 0, lk->lk_recurse, file,
+	    line);
+	WITNESS_UNLOCK(&lk->lock_object, LOP_EXCLUSIVE, file, line);
+	TD_LOCKS_DEC(curthread);
+}
+
+static void
+lockmgr_note_exclusive_upgrade(struct lock *lk, const char *file, int line,
+    int flags)
+{
+
+	LOCK_LOG_LOCK("XUPGRADE", &lk->lock_object, 0, 0, file,
+	    line);
+	WITNESS_UPGRADE(&lk->lock_object, LOP_EXCLUSIVE |
+	    LK_TRYWIT(flags), file, line);
+	TD_SLOCKS_DEC(curthread);
+}
+
+int
+lockmgr_lock_fast_path(struct lock *lk, u_int flags, struct lock_object *ilk,
+    const char *file, int line)
+{
+	struct lock_class *class;
+	uintptr_t x, v, tid;
+	u_int op;
+	bool locked;
+
+	op = flags & LK_TYPE_MASK;
+	locked = false;
+	switch (op) {
+	case LK_SHARED:
+		if (LK_CAN_WITNESS(flags))
+			WITNESS_CHECKORDER(&lk->lock_object, LOP_NEWORDER,
+			    file, line, flags & LK_INTERLOCK ? ilk : NULL);
+		if (__predict_false(lk->lock_object.lo_flags & LK_NOSHARE))
+			break;
+		x = lk->lk_lock;
+		for (;;) {
+			if (LK_CAN_SHARE(x, flags)) {
+				if (atomic_fcmpset_acq_ptr(&lk->lk_lock,
+				    &x, x + LK_ONE_SHARER)) {
+					lockmgr_note_shared_acquire(lk, 0, 0,
+					    file, line, flags);
+					locked = true;
+					break;
+				}
+				continue;
+			}
+			break;
+		}
+		break;
+	case LK_EXCLUSIVE:
+		if (LK_CAN_WITNESS(flags))
+			WITNESS_CHECKORDER(&lk->lock_object, LOP_NEWORDER |
+			    LOP_EXCLUSIVE, file, line, flags & LK_INTERLOCK ?
+			    ilk : NULL);
+		tid = (uintptr_t)curthread;
+		if (lk->lk_lock == LK_UNLOCKED &&
+		    atomic_cmpset_acq_ptr(&lk->lk_lock, LK_UNLOCKED, tid)) {
+			lockmgr_note_exclusive_acquire(lk, 0, 0, file, line,
+			    flags);
+			locked = true;
+		}
+		break;
+	case LK_UPGRADE:
+	case LK_TRYUPGRADE:
+		_lockmgr_assert(lk, KA_SLOCKED, file, line);
+		tid = (uintptr_t)curthread;
+		v = lk->lk_lock;
+		x = v & LK_ALL_WAITERS;
+		v &= LK_EXCLUSIVE_SPINNERS;
+		if (atomic_cmpset_ptr(&lk->lk_lock, LK_SHARERS_LOCK(1) | x | v,
+		    tid | x)) {
+			lockmgr_note_exclusive_upgrade(lk, file, line, flags);
+			locked = true;
+		}
+		break;
+	default:
+		break;
+	}
+	if (__predict_true(locked)) {
+		if (__predict_false(flags & LK_INTERLOCK)) {
+			class = LOCK_CLASS(ilk);
+			class->lc_unlock(ilk);
+		}
+		return (0);
+	} else {
+		return (__lockmgr_args(lk, flags, ilk, LK_WMESG_DEFAULT,
+		    LK_PRIO_DEFAULT, LK_TIMO_DEFAULT, file, line));
+	}
+}
+
+int
+lockmgr_unlock_fast_path(struct lock *lk, u_int flags, struct lock_object *ilk)
+{
+	struct lock_class *class;
+	uintptr_t x, tid;
+	bool unlocked;
+	const char *file;
+	int line;
+
+	file = __FILE__;
+	line = __LINE__;
+
+	_lockmgr_assert(lk, KA_LOCKED, file, line);
+	unlocked = false;
+	x = lk->lk_lock;
+	if ((x & LK_SHARE) == 0) {
+		tid = (uintptr_t)curthread;
+		if (!lockmgr_recursed(lk) &&
+		    atomic_cmpset_rel_ptr(&lk->lk_lock, tid, LK_UNLOCKED)) {
+			lockmgr_note_exclusive_release(lk, file, line);
+			unlocked = true;
+		}
+	} else {
+		for (;;) {
+			if (LK_SHARERS(x) > 1) {
+				if (atomic_fcmpset_rel_ptr(&lk->lk_lock,
+				    &x, x - LK_ONE_SHARER)) {
+					unlocked = true;
+					break;
+				}
+				continue;
+			}
+
+			if ((x & LK_ALL_WAITERS) == 0) {
+				MPASS((x & ~LK_EXCLUSIVE_SPINNERS) ==
+				    LK_SHARERS_LOCK(1));
+				if (atomic_fcmpset_rel_ptr(&lk->lk_lock,
+				    &x, LK_UNLOCKED)) {
+					unlocked = true;
+					break;
+				}
+				continue;
+			}
+			break;
+		}
+		if (unlocked) {
+			WITNESS_UNLOCK(&lk->lock_object, 0, file, line);
+			LOCK_LOG_LOCK("SUNLOCK", &lk->lock_object, 0, 0, file,
+			    line);
+			lockmgr_note_shared_release(lk);
+		}
+	}
+	if (__predict_true(unlocked)) {
+		if (__predict_false(flags & LK_INTERLOCK)) {
+			class = LOCK_CLASS(ilk);
+			class->lc_unlock(ilk);
+		}
+		return (0);
+	} else {
+		return (__lockmgr_args(lk, flags | LK_RELEASE, ilk, LK_WMESG_DEFAULT,
+		    LK_PRIO_DEFAULT, LK_TIMO_DEFAULT, LOCK_FILE, LOCK_LINE));
+	}
+}
+
 int
 __lockmgr_args(struct lock *lk, u_int flags, struct lock_object *ilk,
     const char *wmesg, int pri, int timo, const char *file, int line)
@@ -719,15 +917,13 @@ __lockmgr_args(struct lock *lk, u_int flags, struct lock_object *ilk,
 			    __func__, lk);
 		}
 		if (error == 0) {
-			lock_profile_obtain_lock_success(&lk->lock_object,
-			    contested, waittime, file, line);
-			LOCK_LOG_LOCK("SLOCK", &lk->lock_object, 0, 0, file,
-			    line);
-			WITNESS_LOCK(&lk->lock_object, LK_TRYWIT(flags), file,
-			    line);
-			TD_LOCKS_INC(curthread);
-			TD_SLOCKS_INC(curthread);
-			STACK_SAVE(lk);
+#ifdef LOCK_PROFILING
+			lockmgr_note_shared_acquire(lk, contested, waittime,
+			    file, line, flags);
+#else
+			lockmgr_note_shared_acquire(lk, 0, 0, file, line,
+			    flags);
+#endif
 		}
 		break;
 	case LK_UPGRADE:
@@ -990,14 +1186,13 @@ __lockmgr_args(struct lock *lk, u_int flags, struct lock_object *ilk,
 			    __func__, lk);
 		}
 		if (error == 0) {
-			lock_profile_obtain_lock_success(&lk->lock_object,
-			    contested, waittime, file, line);
-			LOCK_LOG_LOCK("XLOCK", &lk->lock_object, 0,
-			    lk->lk_recurse, file, line);
-			WITNESS_LOCK(&lk->lock_object, LOP_EXCLUSIVE |
-			    LK_TRYWIT(flags), file, line);
-			TD_LOCKS_INC(curthread);
-			STACK_SAVE(lk);
+#ifdef LOCK_PROFILING
+			lockmgr_note_exclusive_acquire(lk, waittime,
+			    contested, file, line, flags);
+#else
+			lockmgr_note_exclusive_acquire(lk, 0, 0, file, line,
+			    flags);
+#endif
 		}
 		break;
 	case LK_DOWNGRADE:
