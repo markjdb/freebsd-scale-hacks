@@ -102,30 +102,15 @@ SYSCTL_INT(_debug_rwlock, OID_AUTO, loops, CTLFLAG_RW, &rowner_loops, 0, "");
 
 static struct lock_delay_config rw_delay = {
 	.initial	= 1000,
-	.step		= 500,
-	.min		= 100,
 	.max		= 5000,
 };
 
 SYSCTL_INT(_debug_rwlock, OID_AUTO, delay_initial, CTLFLAG_RW, &rw_delay.initial,
     0, "");
-SYSCTL_INT(_debug_rwlock, OID_AUTO, delay_step, CTLFLAG_RW, &rw_delay.step,
-    0, "");
-SYSCTL_INT(_debug_rwlock, OID_AUTO, delay_min, CTLFLAG_RW, &rw_delay.min,
-    0, "");
 SYSCTL_INT(_debug_rwlock, OID_AUTO, delay_max, CTLFLAG_RW, &rw_delay.max,
     0, "");
 
-static void
-rw_delay_sysinit(void *dummy)
-{
-
-	rw_delay.initial = mp_ncpus * 25;
-	rw_delay.step = (mp_ncpus * 25) / 2;
-	rw_delay.min = mp_ncpus * 5;
-	rw_delay.max = mp_ncpus * 25 * 10;
-}
-LOCK_DELAY_SYSINIT(rw_delay_sysinit);
+LOCK_DELAY_SYSINIT_DEFAULT(rw_delay);
 #endif
 
 /*

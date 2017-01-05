@@ -56,6 +56,9 @@ __FBSDID("$FreeBSD$");
 
 #include <machine/cpufunc.h>
 
+SDT_PROVIDER_DEFINE(lock);
+SDT_PROBE_DEFINE2(lock, , , starvation, "u_int", "u_int");
+
 CTASSERT(LOCK_CLASS_MAX == 15);
 
 struct lock_class *lock_classes[LOCK_CLASS_MAX + 1] = {
@@ -103,32 +106,61 @@ lock_destroy(struct lock_object *lock)
 	lock->lo_flags &= ~LO_INITIALIZED;
 }
 
+static SYSCTL_NODE(_debug, OID_AUTO, lock, CTLFLAG_RD, NULL, "lock debugging");
+static SYSCTL_NODE(_debug_lock, OID_AUTO, delay, CTLFLAG_RD, NULL,
+    "lock delay");
+
+static u_int __read_mostly backoff_shift = 1;
+SYSCTL_INT(_debug_lock_delay, OID_AUTO, backoff_shift, CTLFLAG_RW, &backoff_shift, 0, "")
+;
+
+static u_int __read_mostly starvation_limit = 131072;
+SYSCTL_INT(_debug_lock_delay, OID_AUTO, starvation_limit, CTLFLAG_RW, &starvation_limit, 0, "");
+
+static u_int __read_mostly restrict_starvation = 0;
+SYSCTL_INT(_debug_lock_delay, OID_AUTO, restrict_starvation, CTLFLAG_RW, &restrict_starvation, 0, "");
+
 void
 lock_delay(struct lock_delay_arg *la)
 {
-	u_int i, delay, backoff, min, max;
+	u_int i, delay;
 	struct lock_delay_config *lc = la->config;
 
 	delay = la->delay;
-
-	if (delay == 0)
-		delay = lc->initial;
-	else {
-		delay += lc->step;
-		max = lc->max;
-		if (delay > max)
-			delay = max;
-	}
-
-	backoff = cpu_ticks() % delay;
-	min = lc->min;
-	if (backoff < min)
-		backoff = min;
-	for (i = 0; i < backoff; i++)
+	for (i = 0; i < delay; i++)
 		cpu_spinwait();
 
+	la->spin_cnt += delay;
+
+	delay <<= backoff_shift;
+	if (__predict_false(delay > lc->max))
+		delay = lc->max;
+	if (__predict_false(la->spin_cnt > starvation_limit)) {
+		SDT_PROBE2(lock, , , starvation, delay, PCPU_GET(cpuid));
+		if (restrict_starvation)
+			delay = lc->initial >> backoff_shift;
+	}
+
 	la->delay = delay;
-	la->spin_cnt += backoff;
+}
+
+static u_int
+lock_roundup_2(u_int val)
+{
+	u_int res;
+
+	for (res = 1; res <= val; res <<= 1)
+		continue;
+
+	return (res);
+}
+
+void
+lock_delay_default_init(struct lock_delay_config *lc)
+{
+
+	lc->initial = lock_roundup_2(mp_ncpus) / 2;
+	lc->max = lc->initial * 512;
 }
 
 #ifdef DDB
@@ -655,7 +687,6 @@ out:
 	critical_exit();
 }
 
-static SYSCTL_NODE(_debug, OID_AUTO, lock, CTLFLAG_RD, NULL, "lock debugging");
 static SYSCTL_NODE(_debug_lock, OID_AUTO, prof, CTLFLAG_RD, NULL,
     "lock profiling");
 SYSCTL_INT(_debug_lock_prof, OID_AUTO, skipspin, CTLFLAG_RW,
