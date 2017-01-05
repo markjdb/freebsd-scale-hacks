@@ -68,6 +68,7 @@
 #define	_VM_PAGE_
 
 #include <vm/pmap.h>
+#include <vm/vm_param.h>
 
 /*
  *	Management of resident (logical) pages.
@@ -205,22 +206,37 @@ struct vm_page {
 
 #define	PQ_NONE		255
 #define	PQ_INACTIVE	0
-#define	PQ_ACTIVE	1
-#define	PQ_LAUNDRY	2
-#define	PQ_UNSWAPPABLE	3
-#define	PQ_COUNT	4
+#define	PQ_INACTIVE_NOLRU 1
+#define	PQ_ACTIVE	2
+#define	PQ_LAUNDRY	3
+#define	PQ_UNSWAPPABLE	4
+#define	PQ_COUNT	5
+
+#define	PQ_BATCHED(m)	((m)->queue == PQ_INACTIVE || (m)->queue == PQ_ACTIVE)
+
+#define	BPQ_COUNT	PA_LOCK_COUNT
+#define	BPQ_IDX(m)	(pa_index(VM_PAGE_TO_PHYS(m)) % BPQ_COUNT)
 
 TAILQ_HEAD(pglist, vm_page);
 SLIST_HEAD(spglist, vm_page);
+
+struct vm_batchqueue {
+	struct pglist	bpq_pl;
+	int		bpq_cnt;
+} __aligned(CACHE_LINE_SIZE);
+
+#define	VM_PQF_CLOCK	0x0001
 
 struct vm_pagequeue {
 	struct mtx	pq_mutex;
 	struct pglist	pq_pl;
 	int		pq_cnt;
+	int		pq_flags;
 	u_int		* const pq_vcnt;
 	const char	* const pq_name;
+	struct vm_page	pq_marker;
+	struct vm_batchqueue pq_bpqs[BPQ_COUNT];
 } __aligned(CACHE_LINE_SIZE);
-
 
 struct vm_domain {
 	struct vm_pagequeue vmd_pagequeues[PQ_COUNT];
@@ -230,9 +246,6 @@ struct vm_domain {
 	boolean_t vmd_oom;
 	int vmd_oom_seq;
 	int vmd_last_active_scan;
-	struct vm_page vmd_laundry_marker;
-	struct vm_page vmd_marker; /* marker for pagedaemon private use */
-	struct vm_page vmd_inacthead; /* marker for LRU-defeating insertions */
 };
 
 extern struct vm_domain vm_dom[MAXMEMDOM];
@@ -243,6 +256,8 @@ extern struct vm_domain vm_dom[MAXMEMDOM];
 #define	vm_pagequeue_unlock(pq)		mtx_unlock(&(pq)->pq_mutex)
 
 #ifdef _KERNEL
+extern vm_page_t bogus_page;
+
 static __inline void
 vm_pagequeue_cnt_add(struct vm_pagequeue *pq, int addend)
 {
@@ -457,6 +472,8 @@ void vm_page_deactivate (vm_page_t);
 void vm_page_deactivate_noreuse(vm_page_t);
 void vm_page_dequeue(vm_page_t m);
 void vm_page_dequeue_locked(vm_page_t m);
+void vm_page_dequeue_locked_nocount(vm_page_t m);
+void vm_page_free_quick(vm_page_t m);
 vm_page_t vm_page_find_least(vm_object_t, vm_pindex_t);
 vm_page_t vm_page_getfake(vm_paddr_t paddr, vm_memattr_t memattr);
 void vm_page_initfake(vm_page_t m, vm_paddr_t paddr, vm_memattr_t memattr);
@@ -479,6 +496,7 @@ vm_page_t vm_page_replace(vm_page_t mnew, vm_object_t object,
     vm_pindex_t pindex);
 void vm_page_requeue(vm_page_t m);
 void vm_page_requeue_locked(vm_page_t m);
+bool vm_page_reset(vm_page_t m);
 int vm_page_sbusied(vm_page_t m);
 vm_page_t vm_page_scan_contig(u_long npages, vm_page_t m_start,
     vm_page_t m_end, u_long alignment, vm_paddr_t boundary, int options);
@@ -706,7 +724,7 @@ static inline bool
 vm_page_inactive(vm_page_t m)
 {
 
-	return (m->queue == PQ_INACTIVE);
+	return (m->queue == PQ_INACTIVE || m->queue == PQ_INACTIVE_NOLRU);
 }
 
 static inline bool

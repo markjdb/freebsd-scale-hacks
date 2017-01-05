@@ -97,6 +97,9 @@ CTASSERT((ZERO_REGION_SIZE & PAGE_MASK) == 0);
 /* NB: Used by kernel debuggers. */
 const u_long vm_maxuser_address = VM_MAXUSER_ADDRESS;
 
+u_int exec_map_entry_size;
+u_int exec_map_entries;
+
 SYSCTL_ULONG(_vm, OID_AUTO, min_kernel_address, CTLFLAG_RD,
     SYSCTL_NULL_ULONG_PTR, VM_MIN_KERNEL_ADDRESS, "Min kernel address");
 
@@ -427,9 +430,7 @@ kmem_free(struct vmem *vmem, vm_offset_t addr, vm_size_t size)
  *	This routine may block.
  */
 vm_offset_t
-kmap_alloc_wait(map, size)
-	vm_map_t map;
-	vm_size_t size;
+kmap_alloc_wait(vm_map_t map, vm_size_t size)
 {
 	vm_offset_t addr;
 
@@ -467,10 +468,7 @@ kmap_alloc_wait(map, size)
  *	waiting for memory in that map.
  */
 void
-kmap_free_wakeup(map, addr, size)
-	vm_map_t map;
-	vm_offset_t addr;
-	vm_size_t size;
+kmap_free_wakeup(vm_map_t map, vm_offset_t addr, vm_size_t size)
 {
 
 	vm_map_lock(map);

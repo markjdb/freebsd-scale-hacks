@@ -693,6 +693,74 @@ vm_object_destroy(vm_object_t object)
 	uma_zfree(obj_zone, object);
 }
 
+static void
+vm_object_terminate_dequeue_run(vm_object_t object, vm_page_t m,
+    struct pglist *list)
+{
+	struct mtx *page_lock;
+	struct vm_pagequeue *pq;
+	vm_page_t m_next;
+	int count;
+	uint8_t queue;
+
+	count = 0;
+	page_lock = vm_page_lockptr(m);
+	queue = m->queue;
+	if (queue != PQ_NONE) {
+		pq = vm_page_pagequeue(m);
+		vm_pagequeue_lock(pq);
+	}
+	TAILQ_FOREACH_FROM_SAFE(m, &object->memq, listq, m_next) {
+		if (m->queue != queue || vm_page_lockptr(m) != page_lock)
+			break;
+		if (queue != PQ_NONE) {
+			vm_page_dequeue_locked_nocount(m);
+			count++;
+		}
+		TAILQ_REMOVE(&object->memq, m, listq);
+		TAILQ_INSERT_TAIL(list, m, listq);
+	}
+	if (queue != PQ_NONE) {
+		vm_pagequeue_cnt_add(pq, -count);
+		vm_pagequeue_unlock(pq);
+	}
+}
+
+static void
+vm_object_terminate_clean_memq(vm_object_t object)
+{
+	struct pglist list;
+	struct mtx *page_lock;
+	vm_page_t m, m_next;
+
+	VM_OBJECT_ASSERT_WLOCKED(object);
+
+	/*
+	 * XXX describe!
+	 */
+	TAILQ_INIT(&list);
+	while ((m = TAILQ_FIRST(&object->memq)) != NULL) {
+		page_lock = vm_page_lockptr(m);
+		mtx_lock(page_lock);
+		vm_object_terminate_dequeue_run(object, m, &list);
+		TAILQ_FOREACH_SAFE(m, &list, listq, m_next) {
+			m->object = NULL;
+			m->flags &= ~PG_ZERO;
+			if (!vm_page_reset(m))
+				TAILQ_REMOVE(&list, m, listq);
+		}
+		mtx_unlock(page_lock);
+		/*
+		 * Free pages to the allocator now that we've detangled them.
+		 */
+		TAILQ_FOREACH_SAFE(m, &list, listq, m_next) {
+			vm_page_free_quick(m);
+			PCPU_INC(cnt.v_pfree);
+		}
+		TAILQ_INIT(&list);
+	}
+}
+
 /*
  *	vm_object_terminate actually destroys the specified object, freeing
  *	up all previously used resources.
@@ -703,7 +771,6 @@ vm_object_destroy(vm_object_t object)
 void
 vm_object_terminate(vm_object_t object)
 {
-	vm_page_t p, p_next;
 
 	VM_OBJECT_ASSERT_WLOCKED(object);
 
@@ -747,28 +814,10 @@ vm_object_terminate(vm_object_t object)
 		object->ref_count));
 
 	/*
-	 * Free any remaining pageable pages.  This also removes them from the
-	 * paging queues.  However, don't free wired pages, just remove them
-	 * from the object.  Rather than incrementally removing each page from
-	 * the object, the page and object are reset to any empty state. 
+	 * Free resident pages.
 	 */
-	TAILQ_FOREACH_SAFE(p, &object->memq, listq, p_next) {
-		vm_page_assert_unbusied(p);
-		vm_page_lock(p);
-		/*
-		 * Optimize the page's removal from the object by resetting
-		 * its "object" field.  Specifically, if the page is not
-		 * wired, then the effect of this assignment is that
-		 * vm_page_free()'s call to vm_page_remove() will return
-		 * immediately without modifying the page or the object.
-		 */ 
-		p->object = NULL;
-		if (p->wire_count == 0) {
-			vm_page_free(p);
-			PCPU_INC(cnt.v_pfree);
-		}
-		vm_page_unlock(p);
-	}
+	vm_object_terminate_clean_memq(object);
+
 	/*
 	 * If the object contained any pages, then reset it to an empty state.
 	 * None of the object's fields, including "resident_page_count", were
