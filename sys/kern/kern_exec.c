@@ -140,6 +140,10 @@ SYSCTL_INT(_kern, OID_AUTO, disallow_high_osrel, CTLFLAG_RW,
     &disallow_high_osrel, 0,
     "Disallow execution of binaries built for higher version of the world");
 
+static int __read_mostly exec_free_args_advise = 1;
+SYSCTL_INT(_kern, OID_AUTO, exec_free_args_advise, CTLFLAG_RW,
+    &exec_free_args_advise, 0, "");
+
 static int map_at_zero = 0;
 SYSCTL_INT(_security_bsd, OID_AUTO, map_at_zero, CTLFLAG_RWTUN, &map_at_zero, 0,
     "Permit processes to map an object at virtual address 0.");
@@ -1372,9 +1376,14 @@ exec_free_args_kva(void *cookie)
 	argkva = cookie;
 	base = argkva->addr;
 
-	vm_map_madvise(exec_map, base, base + exec_map_entry_size, MADV_FREE);
+	if (exec_free_args_advise == 1)
+		vm_map_madvise(exec_map, base, base + exec_map_entry_size,
+		    MADV_FREE);
 	if (!atomic_cmpset_ptr((uintptr_t *)DPCPU_PTR(exec_args_kva),
 	    (uintptr_t)NULL, (uintptr_t)argkva)) {
+		if (exec_free_args_advise == 2)
+			vm_map_madvise(exec_map, base, base + exec_map_entry_size,
+			    MADV_FREE);
 		mtx_lock(&exec_args_kva_mtx);
 		SLIST_INSERT_HEAD(&exec_args_kva_freelist, argkva, next);
 		wakeup_one(&exec_args_kva_freelist);
