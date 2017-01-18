@@ -109,7 +109,7 @@ int	_sx_slock(struct sx *sx, int opts, const char *file, int line);
 int	_sx_xlock(struct sx *sx, int opts, const char *file, int line);
 void	_sx_sunlock(struct sx *sx, const char *file, int line);
 void	_sx_xunlock(struct sx *sx, const char *file, int line);
-int	_sx_xlock_hard(struct sx *sx, uintptr_t tid, int opts,
+int	_sx_xlock_hard(struct sx *sx, uintptr_t v, uintptr_t tid, int opts,
 	    const char *file, int line);
 int	_sx_slock_hard(struct sx *sx, int opts, const char *file, int line);
 void	_sx_xunlock_hard(struct sx *sx, uintptr_t tid, const char *file, int
@@ -141,6 +141,11 @@ struct sx_args {
 
 #define	SX_SYSINIT(name, sxa, desc)	SX_SYSINIT_FLAGS(name, sxa, desc, 0)
 
+#define	SX_READ_VALUE(sx)	((sx)->sx_lock)
+
+#define	lv_sx_owner(v)	\
+	((v & SX_LOCK_SHARED) ? NULL : (struct thread *)SX_OWNER(v))
+
 /*
  * Full lock operations that are suitable to be inlined in non-debug kernels.
  * If the lock can't be acquired or released trivially then the work is
@@ -153,11 +158,12 @@ __sx_xlock(struct sx *sx, struct thread *td, int opts, const char *file,
     int line)
 {
 	uintptr_t tid = (uintptr_t)td;
+	uintptr_t v;
 	int error = 0;
 
-	if (sx->sx_lock != SX_LOCK_UNLOCKED ||
-	    !atomic_cmpset_acq_ptr(&sx->sx_lock, SX_LOCK_UNLOCKED, tid))
-		error = _sx_xlock_hard(sx, tid, opts, file, line);
+	v = SX_LOCK_UNLOCKED;
+	if (!atomic_fcmpset_acq_ptr(&sx->sx_lock, &v, tid))
+		error = _sx_xlock_hard(sx, v, tid, opts, file, line);
 	else 
 		LOCKSTAT_PROFILE_OBTAIN_RWLOCK_SUCCESS(sx__acquire, sx,
 		    0, 0, file, line, LOCKSTAT_WRITER);
@@ -174,11 +180,11 @@ __sx_xunlock(struct sx *sx, struct thread *td, const char *file, int line)
 	if (sx->sx_recurse == 0)
 		LOCKSTAT_PROFILE_RELEASE_RWLOCK(sx__release, sx,
 		    LOCKSTAT_WRITER);
-	if (sx->sx_lock != tid ||
-	    !atomic_cmpset_rel_ptr(&sx->sx_lock, tid, SX_LOCK_UNLOCKED))
+	if (!atomic_cmpset_rel_ptr(&sx->sx_lock, tid, SX_LOCK_UNLOCKED))
 		_sx_xunlock_hard(sx, tid, file, line);
 }
 
+#if 0
 /* Acquire a shared lock. */
 static __inline int
 __sx_slock(struct sx *sx, int opts, const char *file, int line)
@@ -187,8 +193,8 @@ __sx_slock(struct sx *sx, int opts, const char *file, int line)
 	int error = 0;
 
 	if (!(x & SX_LOCK_SHARED) ||
-	    !atomic_cmpset_acq_ptr(&sx->sx_lock, x, x + SX_ONE_SHARER))
-		error = _sx_slock_hard(sx, opts, file, line);
+	    !atomic_fcmpset_acq_ptr(&sx->sx_lock, &x, x + SX_ONE_SHARER))
+		error = _sx_slock_hard(sx, x, opts, file, line);
 	else
 		LOCKSTAT_PROFILE_OBTAIN_RWLOCK_SUCCESS(sx__acquire, sx,
 		    0, 0, file, line, LOCKSTAT_READER);
@@ -212,6 +218,21 @@ __sx_sunlock(struct sx *sx, const char *file, int line)
 	if (x == (SX_SHARERS_LOCK(1) | SX_LOCK_EXCLUSIVE_WAITERS) ||
 	    !atomic_cmpset_rel_ptr(&sx->sx_lock, x, x - SX_ONE_SHARER))
 		_sx_sunlock_hard(sx, file, line);
+}
+#endif
+
+static __inline int
+__sx_slock(struct sx *sx, int opts, const char *file, int line)
+{
+
+	return (_sx_slock_hard(sx, opts, file, line));
+}
+
+static __inline void
+__sx_sunlock(struct sx *sx, const char *file, int line)
+{
+
+	_sx_sunlock_hard(sx, file, line);
 }
 
 /*
