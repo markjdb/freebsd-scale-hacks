@@ -427,6 +427,10 @@ vn_writechk(vp)
 	return (0);
 }
 
+static u_int __read_mostly	vfs_optional_close;
+SYSCTL_UINT(_vfs, OID_AUTO, vfs_optional_close, CTLFLAG_RW, &vfs_optional_close,
+    0, "is close optional?");
+
 /*
  * Vnode close call
  */
@@ -436,6 +440,16 @@ vn_close1(struct vnode *vp, int flags, struct ucred *file_cred,
 {
 	struct mount *mp;
 	int error, lock_flags;
+
+	if (vfs_optional_close) {
+		if ((flags & FWRITE) == 0 && vp->v_op->vop_want != NULL) {
+			if (!VOP_WANT(vp, td, VFS_WANT_CLOSE)) {
+				if (!keep_ref)
+					vrele(vp);
+				return (0);
+			}
+		}
+	}
 
 	if (vp->v_type != VFIFO && (flags & FWRITE) == 0 &&
 	    MNT_EXTENDED_SHARED(vp->v_mount))
